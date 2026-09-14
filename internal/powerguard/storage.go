@@ -319,6 +319,9 @@ func (m *Manager) collectStorage(forceSMART bool) StorageStatus {
 		info, ok := blocks[kname]
 		if !ok {
 			info = m.readBlockInfoFromSysfs(kname)
+			if topologyErr != nil {
+				slot.Warning = "硬盘用途未知：lsblk 不可用"
+			}
 		}
 		slot.Model = strings.TrimSpace(info.Model)
 		slot.Serial = strings.TrimSpace(info.Serial)
@@ -330,7 +333,7 @@ func (m *Manager) collectStorage(forceSMART bool) StorageStatus {
 		slot.Activity, slot.Utilization = m.cachedStorageActivity(spec.ID, kname)
 		if warning := m.mdWarning(info.Purposes); warning != "" {
 			slot.State = StorageWarning
-			slot.Warning = warning
+			slot.Warning = strings.Trim(strings.Join([]string{slot.Warning, warning}, "；"), "；")
 		}
 		status.Slots = append(status.Slots, slot)
 	}
@@ -558,15 +561,17 @@ func (m *Manager) readBlockTopology() (map[string]blockInfo, error) {
 	if m.Root != "" && m.Root != "/" {
 		return map[string]blockInfo{}, nil
 	}
-	path, err := exec.LookPath("lsblk")
+	path, err := findSystemTool("lsblk")
 	if err != nil {
 		return nil, errors.New("未找到 lsblk，无法判断硬盘是否已使用")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, path, "-J", "-b", "-o", "NAME,KNAME,TYPE,SIZE,MODEL,SERIAL,FSTYPE,MOUNTPOINTS").Output()
+	command := exec.CommandContext(ctx, path, "-J", "-b", "-o", "NAME,KNAME,TYPE,SIZE,MODEL,SERIAL,FSTYPE,MOUNTPOINTS")
+	command.Env = systemToolEnvironment()
+	output, err := command.Output()
 	if err != nil {
-		return nil, fmt.Errorf("执行 lsblk: %w", err)
+		return nil, fmt.Errorf("执行系统 lsblk (%s，已隔离应用环境): %w；硬盘用途未知，设备与 SMART 检测继续", path, err)
 	}
 	return parseLSBLK(output)
 }
@@ -618,7 +623,8 @@ func inspectLSBLKNode(node lsblkNode, used *bool, purposes map[string]bool) {
 			purposes["RAID 成员"] = true
 		}
 	}
-	if strings.HasPrefix(node.Type, "raid") {
+	// util-linux reports concatenated md arrays as "linear", not "raid*".
+	if strings.HasPrefix(node.Type, "raid") || (node.Type == "linear" && strings.HasPrefix(node.KName, "md")) {
 		*used = true
 		name := node.KName
 		if name == "" {
@@ -791,15 +797,26 @@ func (m *smartPowerMode) UnmarshalJSON(b []byte) error {
 	}
 }
 
-func findSmartctl() (string, error) {
-	for _, candidate := range []string{"/usr/sbin/smartctl", "/usr/bin/smartctl"} {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
+// System tools must not inherit an application's loader or plugin paths.
+// In particular LD_LIBRARY_PATH/LD_PRELOAD can load incompatible shared libraries.
+func systemToolEnvironment() []string {
+	return []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "LANG=C"}
+}
+
+func findSystemTool(name string) (string, error) {
+	for _, directory := range []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"} {
+		path := filepath.Join(directory, name)
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			return path, nil
 		}
 	}
-	path, err := exec.LookPath("smartctl")
+	return "", fmt.Errorf("system tool %s not found in standard system directories", name)
+}
+
+func findSmartctl() (string, error) {
+	path, err := findSystemTool("smartctl")
 	if err != nil {
-		return "", errors.New("未找到 smartctl，仓位可显示但无法读取 SMART")
+		return "", errors.New("未找到系统 smartctl，仓位可显示但无法读取 SMART")
 	}
 	return path, nil
 }
@@ -812,7 +829,9 @@ func readSMART(smartctl, device string, standbyAware, force bool) (smartResult, 
 	args = append(args, "-H", "-A", device)
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	output, commandErr := exec.CommandContext(ctx, smartctl, args...).CombinedOutput()
+	command := exec.CommandContext(ctx, smartctl, args...)
+	command.Env = systemToolEnvironment()
+	output, commandErr := command.CombinedOutput()
 	result, parseErr := parseSMART(output)
 	if parseErr == nil {
 		return result, nil
