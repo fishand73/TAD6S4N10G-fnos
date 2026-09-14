@@ -1,6 +1,7 @@
 package powerguard
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ type Server struct {
 	Socket      string
 	WebRoot     string
 	BasePath    string
+	ReadOnly    bool
 	SocketGroup string
 	Logger      *log.Logger
 }
@@ -97,9 +99,18 @@ func (s *Server) ListenAndServe() error {
 			}
 			r.URL.Path = path
 		}
+		if s.ReadOnly {
+			if r.Method != http.MethodGet || (path != "/api/status" && path != "/api/debug/report") {
+				writeError(w, http.StatusForbidden, "read-only endpoint")
+				return
+			}
+		} else if !trustedPeer(r.Context()) {
+			writeError(w, http.StatusForbidden, "untrusted socket peer")
+			return
+		}
 		mux.ServeHTTP(w, r)
 	}))
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, ConnContext: socketPeerContext}
 	return server.Serve(listener)
 }
 
@@ -108,7 +119,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.Manager.Status())
+	status := s.Manager.Status()
+	if s.ReadOnly {
+		status.Config.GPIO.Scripts = nil
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -244,7 +259,17 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+type socketPeerKey struct{}
+
+func trustedPeer(ctx context.Context) bool {
+	trusted, _ := ctx.Value(socketPeerKey{}).(bool)
+	return trusted
+}
+
 func isAdmin(r *http.Request) bool {
+	if !trustedPeer(r.Context()) {
+		return false
+	}
 	value := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Trim-Isadmin")))
 	return value == "true" || value == "1" || value == "yes"
 }

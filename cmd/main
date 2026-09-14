@@ -64,7 +64,7 @@ stop_service() {
   # 明确不 rmmod it87（风扇驱动可继续供系统或其他组件使用）
   if ! is_running; then
     rm -f "${PID_FILE}"
-    exit 0
+    return 0
   fi
   pid="$(cat "${PID_FILE}")"
   kill -TERM "${pid}" 2>/dev/null || true

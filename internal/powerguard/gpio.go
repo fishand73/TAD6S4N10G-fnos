@@ -440,7 +440,11 @@ func (m *Manager) ExecuteGPIOActionContext(ctx context.Context, event GPIOEvent)
 		err = m.ApplyCurrent()
 	default:
 		if _, isScript := gpioScriptIDFromAction(event.Action); isScript && event.Script != nil {
-			output, err = executeGPIOScript(ctx, event)
+			if !m.AllowRootScripts {
+				err = errors.New("root scripts are disabled; a root administrator must enable --allow-root-scripts at service startup")
+			} else {
+				output, err = executeGPIOScript(ctx, event)
+			}
 		} else {
 			err = fmt.Errorf("unsupported gpio action %q", event.Action)
 		}
@@ -494,8 +498,14 @@ func executeGPIOScript(parent context.Context, event GPIOEvent) (string, error) 
 	ctx, cancel := context.WithTimeout(parent, gpioScriptTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc")
+	cleanup, err := prepareScriptProcess(command)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	command.WaitDelay = time.Second
 	command.Dir = "/"
-	command.Env = append(os.Environ(),
+	command.Env = append([]string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8"},
 		"TAD_GPIO_BUTTON_ID="+event.ButtonID,
 		"TAD_GPIO_STAGE="+event.Stage,
 		"TAD_GPIO_DURATION_MS="+strconv.FormatInt(event.Duration.Milliseconds(), 10),
@@ -507,7 +517,7 @@ func executeGPIOScript(parent context.Context, event GPIOEvent) (string, error) 
 	output := &cappedBuffer{limit: gpioScriptOutputMax}
 	command.Stdout = output
 	command.Stderr = output
-	err := command.Run()
+	err = command.Run()
 	text := strings.TrimSpace(output.String())
 	if output.truncated {
 		text += "\n[输出已截断]"

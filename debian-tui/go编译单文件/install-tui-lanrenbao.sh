@@ -63,11 +63,14 @@ if [ ! -f "$HERE/tank" ]; then
   fi
 fi
 
-# Let the invoking (SSH) user read the module socket (owned root:www-data), so
+("$HERE/tad-module" serve --help 2>&1 || true) | grep -- "-read-only" >/dev/null || die "后端版本过旧：请提供包含 --read-only 的新版 tad-module，拒绝安装不安全的只读服务"
+getent group tank-readers >/dev/null || groupadd --system tank-readers
+
+# Let the invoking (SSH) user read the module socket (owned root:tank-readers), so
 # `tank` runs without sudo.
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
-  log "把启动用户 $SUDO_USER 加入 www-data（读取 /run/tank/tad-module.sock）"
-  usermod -a -G www-data "$SUDO_USER" 2>/dev/null || warn "无法把 $SUDO_USER 加入 www-data，请手动 usermod -a -G www-data $SUDO_USER"
+  log "把启动用户 $SUDO_USER 加入 tank-readers（读取 /run/tank/tad-module.sock）"
+  usermod -a -G tank-readers "$SUDO_USER" 2>/dev/null || warn "无法把 $SUDO_USER 加入 tank-readers，请手动 usermod -a -G tank-readers $SUDO_USER"
 fi
 
 log "创建目录"
@@ -144,7 +147,7 @@ cat <<'DONE'
 
 完成。使用：
   systemctl status tank
-  tank                打开 TUI 面板（如权限不足，把当前用户加入 www-data 组，或 sudo tank）
+  tank                打开 TUI 面板（如权限不足，把当前用户加入 tank-readers 组，或 sudo tank）
   tank --once         输出一次文字快照
   journalctl -u tank.service -f
 

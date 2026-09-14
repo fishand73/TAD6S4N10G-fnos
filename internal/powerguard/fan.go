@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -477,7 +478,11 @@ func (m *Manager) applyFanLocked(cfg FanConfig) error {
 			continue
 		}
 		target := 0
-		if emergency {
+		cpuMissing := cpuErr != nil && slices.Contains(sources, "cpu")
+		if cpuMissing {
+			errs = append(errs, fmt.Errorf("fan %s CPU temperature unavailable: %w", id, cpuErr))
+		}
+		if emergency || cpuMissing {
 			target = 100
 		} else {
 			for _, source := range sources {
@@ -731,6 +736,16 @@ func restoreFan(fan FanDevice, original originalFan) error {
 	if original.Mode < 0 || original.Mode > 2 || original.PWM < 0 || original.PWM > 255 {
 		return fmt.Errorf("saved state for fan %s is invalid", fan.ID)
 	}
+	if original.Mode == 0 {
+		return setFanPWM(fan, 100)
+	}
+	if current, err := readInt(fan.PWMPath); err != nil {
+		return err
+	} else if current == 255 {
+		if err := setFanPWM(fan, 99); err != nil {
+			return err
+		}
+	}
 	if err := writeAndVerify(fan.EnablePath, 1); err != nil {
 		return fmt.Errorf("restore fan %s manual mode: %w", fan.ID, err)
 	}
@@ -840,4 +855,46 @@ func jsonUnmarshalStrict(data []byte, value any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(value)
+}
+
+// Restore channels removed from every curve before relinquishing ownership.
+func (m *Manager) restoreRemovedFansLocked(previous, next FanConfig) error {
+	removed := selectedFanSources(previous)
+	for id := range selectedFanSources(next) {
+		delete(removed, id)
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	if err := m.validateSavedHardwareIfAvailable(); err != nil {
+		return err
+	}
+	state, err := m.loadFanStateLocked()
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	fans, err := m.DiscoverFans()
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]FanDevice)
+	for _, fan := range fans {
+		byID[fan.ID] = fan
+	}
+	var errs []error
+	for _, original := range state.Fans {
+		if _, ok := removed[original.ID]; !ok {
+			continue
+		}
+		fan, ok := byID[original.ID]
+		if !ok {
+			errs = append(errs, fmt.Errorf("removed fan %s is missing", original.ID))
+			continue
+		}
+		errs = append(errs, restoreFan(fan, original))
+	}
+	return errors.Join(errs...)
 }

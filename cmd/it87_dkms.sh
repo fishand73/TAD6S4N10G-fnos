@@ -128,9 +128,9 @@ it87_probe_sio_devid() {
 #include <stdio.h>
 #include <sys/io.h>
 static int read_id(unsigned int p){
-    outb(0x87,p); outb(0x01,p); outb(0x55,p); outb(0x55,p);
-    outb(0x20,p); unsigned char lo=inb(p+1);
-    outb(0x21,p); unsigned char hi=inb(p+1);
+    outb(0x87,p); outb(0x01,p); outb(0x55,p); outb(p == 0x4e ? 0xaa : 0x55,p);
+    outb(0x20,p); unsigned char hi=inb(p+1);
+    outb(0x21,p); unsigned char lo=inb(p+1);
     outb(0x02,p); outb(0x02,p+1);
     return (hi<<8)|lo;
 }

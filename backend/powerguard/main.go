@@ -135,6 +135,9 @@ func serve(args []string) error {
 	state := set.String("state", "", "state file")
 	socket := set.String("socket", "", "Unix socket")
 	webRoot := set.String("web-root", "", "static web root")
+	allowScripts := set.Bool("allow-root-scripts", false, "allow trusted GPIO scripts to execute as root")
+	readOnly := set.Bool("read-only", false, "expose only read-only status and diagnostic endpoints")
+	socketGroup := set.String("socket-group", "www-data", "Unix socket access group")
 	logPath := set.String("log", "", "log file")
 	root := set.String("sys-root", "/", "alternate system root (testing only)")
 	if err := set.Parse(args); err != nil {
@@ -158,7 +161,7 @@ func serve(args []string) error {
 		defer file.Close()
 		logger = log.New(file, "", log.LstdFlags|log.LUTC)
 	}
-	manager := &powerguard.Manager{Root: *root, ConfigPath: *config, StatePath: *state, Version: version}
+	manager := &powerguard.Manager{Root: *root, ConfigPath: *config, StatePath: *state, Version: version, AllowRootScripts: *allowScripts}
 	cfg, err := manager.LoadOrCreateConfig()
 	if err != nil {
 		return err
@@ -172,7 +175,7 @@ func serve(args []string) error {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		server := &powerguard.Server{Manager: manager, Socket: *socket, WebRoot: *webRoot, BasePath: "/app/tad-module", Logger: logger}
+		server := &powerguard.Server{Manager: manager, Socket: *socket, WebRoot: *webRoot, BasePath: "/app/tad-module", Logger: logger, ReadOnly: *readOnly, SocketGroup: *socketGroup}
 		done <- server.ListenAndServe()
 	}()
 	go reapplyLoop(ctx, manager, logger)

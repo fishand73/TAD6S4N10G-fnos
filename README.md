@@ -22,7 +22,7 @@
 
 Debian TUI 的 `tad-module` 后端必须以 root 启动，这是官方 `serve()` 的硬性要求，不是可选的 systemd 配置。后端启动时会强制检查 root，并统一管理 `/sys`、`/dev`、RAPL、coretemp、hwmon/PWM、GPIO 和 SMART 等硬件接口；服务生命周期还包含启动时应用状态、后台重应用/风扇/硬盘/GPIO 轮询，以及停止时恢复原始状态。以普通用户启动会在创建 `/api/status` Socket 之前直接退出并报告 `root privileges are required`。
 
-安装脚本默认写入 `enabled=false`、风扇和 GPIO 关闭的监控配置，这只表示默认不会主动应用功耗、风扇或 GPIO 设置，不能取消后端的 root 启动要求。`tank` 本身是面向管理员的只读终端工具；root 用户可直接运行，获授权的普通 SSH 用户也可以通过 `www-data` Socket 组读取状态，但后端服务始终以 root 运行。
+安装脚本默认写入 `enabled=false`、风扇和 GPIO 关闭的监控配置，这只表示默认不会主动应用功耗、风扇或 GPIO 设置，不能取消后端的 root 启动要求。`tank` 本身是面向管理员的只读终端工具；root 用户可直接运行，获授权的普通 SSH 用户也可以通过 `tank-readers` Socket 组读取状态，但后端服务始终以 root 运行。
 
 ## 默认策略
 
@@ -68,7 +68,7 @@ RR 的 CPUinfo 实现会筛选标签为 `Core N` 的温度并取最大值。本�
 
 除无动作、仅记录日志、刷新硬盘仓位、刷新仓位并检查 SMART、重新应用插件配置等内置动作外，按钮控制页还提供自定义 Bash 脚本管理。用户可新增、编辑和删除脚本，再按脚本名称将其绑定到任意按键及按压时长；编辑器使用等宽字体并提供基础 Bash 语法高亮。脚本及映射只有在点击“保存按钮控制”后才会持久化。
 
-自定义脚本由插件服务以 root 通过 `/bin/bash --noprofile --norc` 执行，单次最长 30 秒，标准输出和错误输出合计最多保留 64 KiB。执行时提供 `TAD_GPIO_BUTTON_ID`、`TAD_GPIO_STAGE`、`TAD_GPIO_DURATION_MS` 和 `TAD_GPIO_SCRIPT_NAME` 环境变量。脚本可以修改或删除系统数据，插件不会分析脚本是否安全，请只保存完全信任的内容。
+自定义脚本默认禁止执行；只有 root 管理员在服务启动时显式指定 `--allow-root-scripts` 才能启用，Web 配置无法打开此权限。启用后，自定义脚本由插件服务以 root 通过 `/bin/bash --noprofile --norc` 执行，单次最长 30 秒，标准输出和错误输出合计最多保留 64 KiB。执行时提供 `TAD_GPIO_BUTTON_ID`、`TAD_GPIO_STAGE`、`TAD_GPIO_DURATION_MS` 和 `TAD_GPIO_SCRIPT_NAME` 环境变量。脚本可以修改或删除系统数据，插件不会分析脚本是否安全，请只保存完全信任的内容。
 
 ## Debug 调试报告
 
@@ -147,3 +147,15 @@ go vet ./...
 ## 重要限制
 
 降低 PL1/PL2 会牺牲部分峰值性能。不同主板 BIOS 可能锁定 RAPL 或 IT87 PWM，若写入被拒绝或回读值不一致，插件会报告错误而不会伪装成功。N100/N150/N305 之外的处理器必须经过单独验证后才能加入支持范围；多风扇控制仍取决于 IT87 驱动是否暴露完整的 RPM/PWM 通道。硬盘仓位与 GPIO 映射针对 TAD6S4N10G 固定硬件设计；后续若支持其他机型，需要单独提供并验证映射表。
+
+## 安全加固后的部署边界
+
+管理 Socket 除文件权限外还校验 Linux `SO_PEERCRED`：仅接受 root 或 `www-data` 用户本身，加入 www-data 组不再获得管理权限。管理员请求头仍要求 fnOS 网关覆盖客户端同名头；网关进程本身属于受信任组件，目标 fnOS 上需验证其运行 UID 和头覆盖行为。
+
+Debian TUI 服务使用 `--read-only --socket-group tank-readers`，只开放 GET `/api/status` 和 `/api/debug/report`，状态响应去除脚本正文；所有写入和静态文件请求均拒绝。安装器要求支持此参数的新版后端，旧版预编译包会被拒绝。现有用户升级时不会自动移除 www-data 组成员资格，避免破坏其他应用，请管理员自行核对历史授权。
+
+root 脚本必须通过启动参数显式启用。执行环境不继承服务凭据或 BASH_ENV；超时和执行结束时清理进程组，输出管道等待有上限。显式开启后脚本仍是完全可信的 root 代码，不是沙箱；恶意脚本可绕过进程组约束，因此不要向不可信用户开放脚本管理。服务整体仍以 root 执行硬件操作，本次未拆分独立非特权 Web 进程。
+
+回归检查：`go run ./scripts/regression` 使用临时 sysfs 验证风扇退出控制、温度读取失败、脚本默认关闭及子进程取消，不写入主机硬件。
+
+生命周期与芯片探测回归：`python3 scripts/regression/lifecycle.py`（需要 C 编译器）；只使用模拟 I/O。Debian 安装时请将本次源码构建的 `tad-module` 放在安装脚本旁，旧版 v0.10.17 下载包尚不包含上述新参数。

@@ -127,32 +127,34 @@ type PackageStatus struct {
 }
 
 type Status struct {
-	Version          string               `json:"version"`
-	DeviceName       string               `json:"device_name,omitempty"`
-	OSName           string               `json:"os_name,omitempty"`
-	OSVersion        string               `json:"os_version,omitempty"`
-	CPUModel         string               `json:"cpu_model"`
-	Profile          Profile              `json:"profile"`
-	Supported        bool                 `json:"supported"`
-	Config           Config               `json:"config"`
-	EffectiveMaxPL1W int64                `json:"effective_max_pl1_w"`
-	EffectiveMaxPL2W int64                `json:"effective_max_pl2_w"`
-	Packages         []PackageStatus      `json:"packages"`
-	Temperatures     []Temperature        `json:"temperatures"`
-	CPUTemperature   CPUTemperatureStatus `json:"cpu_temperature"`
-	GPURuntime       []string             `json:"gpu_runtime"`
-	FanControl       FanControlStatus     `json:"fan_control"`
-	Storage          StorageStatus        `json:"storage"`
-	GPIO             GPIOStatus           `json:"gpio"`
-	LastApply        time.Time            `json:"last_apply,omitempty"`
-	LastError        string               `json:"last_error,omitempty"`
+	RootScriptsAllowed bool                 `json:"root_scripts_allowed"`
+	Version            string               `json:"version"`
+	DeviceName         string               `json:"device_name,omitempty"`
+	OSName             string               `json:"os_name,omitempty"`
+	OSVersion          string               `json:"os_version,omitempty"`
+	CPUModel           string               `json:"cpu_model"`
+	Profile            Profile              `json:"profile"`
+	Supported          bool                 `json:"supported"`
+	Config             Config               `json:"config"`
+	EffectiveMaxPL1W   int64                `json:"effective_max_pl1_w"`
+	EffectiveMaxPL2W   int64                `json:"effective_max_pl2_w"`
+	Packages           []PackageStatus      `json:"packages"`
+	Temperatures       []Temperature        `json:"temperatures"`
+	CPUTemperature     CPUTemperatureStatus `json:"cpu_temperature"`
+	GPURuntime         []string             `json:"gpu_runtime"`
+	FanControl         FanControlStatus     `json:"fan_control"`
+	Storage            StorageStatus        `json:"storage"`
+	GPIO               GPIOStatus           `json:"gpio"`
+	LastApply          time.Time            `json:"last_apply,omitempty"`
+	LastError          string               `json:"last_error,omitempty"`
 }
 
 type Manager struct {
-	Root       string
-	ConfigPath string
-	StatePath  string
-	Version    string
+	Root             string
+	ConfigPath       string
+	StatePath        string
+	Version          string
+	AllowRootScripts bool
 
 	mu            sync.Mutex
 	lastApply     time.Time
@@ -308,6 +310,11 @@ func (m *Manager) SaveAndApply(cfg Config) error {
 		m.lastError = err.Error()
 		return err
 	}
+	if previousErr == nil && previous.Fan.Enabled && cfg.Fan.Enabled {
+		if err := m.restoreRemovedFansLocked(previous.Fan, cfg.Fan); err != nil {
+			return err
+		}
+	}
 	if err := writeJSONAtomic(m.ConfigPath, cfg, 0o600); err != nil {
 		m.lastError = err.Error()
 		return err
@@ -375,6 +382,11 @@ func (m *Manager) SaveFanConfig(fan FanConfig) error {
 	if err := m.validateFanLocked(cfg.Fan); err != nil {
 		m.lastError = err.Error()
 		return err
+	}
+	if previous.Enabled && cfg.Fan.Enabled {
+		if err := m.restoreRemovedFansLocked(previous, cfg.Fan); err != nil {
+			return err
+		}
 	}
 	if err := writeJSONAtomic(m.ConfigPath, cfg, 0o600); err != nil {
 		m.lastError = err.Error()
@@ -777,7 +789,7 @@ func normalizeCPUModel(model string) string {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	status := Status{Version: m.Version, LastApply: m.lastApply, LastError: m.lastError}
+	status := Status{RootScriptsAllowed: m.AllowRootScripts, Version: m.Version, LastApply: m.lastApply, LastError: m.lastError}
 	status.DeviceName, status.OSName, status.OSVersion = m.deviceSystemInfo()
 	if m.fanLastError != "" {
 		status.LastError = combineError(status.LastError, errors.New(m.fanLastError))
